@@ -4,11 +4,10 @@
 #       Create a new Managed Azure VM to be used as a sandbox.
 #
 # .DESCRIPTION
-#       Create a new Azure VM with a Managed Disk. The VM utilizes Windows Sandbox to mount a (possibly compromised) VHD so you can safely view the contents. If you'd like to modify the defaults, please review & change the code prior to running. Based on https://github.com/rjmccallumbigl/Azure-PowerShell---Create-New-VM/blob/master/createNewVM.ps1.
+#       Create a new managed Azure VM. The VM utilizes Windows Sandbox to mount a (possibly compromised) VHD so you can safely view the contents using 7-Zip. If you'd like to modify the defaults, please review & change the code prior to running. Based on https://github.com/rjmccallumbigl/Azure-PowerShell---Create-New-VM/blob/master/createNewVM.ps1.
 #
 # .NOTES
-        Version: 0.1.0
-#
+        Version: 0.2.0
 #
 # .PARAMETER VMLocalAdminUser
 #       The username you will use on your VM. The following restrictions apply:
@@ -34,6 +33,9 @@ param (
 	[SecureString]
 	$VMLocalAdminSecurePassword
 )
+
+# Log in to Azure
+Connect-AzAccount -DeviceCode
 
 # Declare variables, modify as necessary
 $vmName = "sandboxVM"
@@ -117,50 +119,64 @@ Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Force -Confirm:$false;
 Install-PackageProvider -Name NuGet -MinimumVersion 2.8.5.201 -Force -confirm:$false;
 Install-Module -Name Az -Scope AllUsers -Repository PSGallery -Force -AllowClobber -confirm:$false;
 Enable-WindowsOptionalFeature -FeatureName "Containers-DisposableClientVM" -All -Online -NoRestart;
-
-$startScript = @"
-# Run on Sandboxed VM and enter the prompts to copy disk over from Azure
-Connect-AzAccount
-"@
-$startScript += "`n$untrustworthyVMName = Read-Host 'What is the name of the problem VM?'"
-$startScript += "`n$untrustworthyVMRGName = Read-Host 'What is the Resource Group of the problem VM?'"
-$startScript += "`n$virtualMachine = Get-AzVM -ResourceGroupName $untrustworthyVMRGName -Name $untrustworthyVMName"
-$startScript += "`nWrite-Host 'Stopping VM...'"
-$startScript += "`nStop-AzVM -Name $untrustworthyVMName -ResourceGroupName $untrustworthyVMRGName -Force"
-$startScript += "`nWrite-Host 'Granting access to disk...'"
-$startScript += "`n$sas = Grant-AzDiskAccess -ResourceGroupName $untrustworthyVMRGName -DiskName $virtualMachine.StorageProfile.OsDisk.Name -Access 'Read' -DurationInSecond 3600"
-$startScript += "`nWrite-Host 'Downloading disk...'"
-$startScript += "`nStart-BitsTransfer -Source $sas.AccessSAS -dest 'F:\disk.vhd'"
-$startScript | Out-File -FilePath "F:\downloadVHD.ps1" -Force -Encoding Default
-
-$startBatch = @"
-powershell "F:\downloadVHD.ps1"
-"@
-$startBatch | Out-File -FilePath "C:\ProgramData\Microsoft\Windows\Start Menu\Programs\StartUp\downloadVHD.bat" -Force -Encoding Default
-
-$mountScript += "`nWrite-Host 'Mounting disk content...'"
-$mountScript += "`n$path = md mountPoint;"
-$mountScript += "`nMount-WindowsImage -ImagePath disk.vhd -Path $path.FullName -Index 1;"
-$mountScript | Out-File -FilePath "F:\mountVHD.ps1" -Force -Encoding Default
-
 $wsbScript = @"
 <Configuration>
-<VGpu>Default</VGpu>
-<Networking>Disable</Networking>
-<MappedFolders>
-   <MappedFolder>
-     <HostFolder>F:\</HostFolder>
-     <ReadOnly>Default</ReadOnly>
-   </MappedFolder>
-</MappedFolders>
-<LogonCommand>
-   <Command>powershell "& C:\users\WDAGUtilityAccount\Desktop\mountVHD.ps1"</Command>
+    <vGPU>Disable</vGPU>
+    <Networking>Disable</Networking>
+    <AudioInput>Disable</AudioInput>
+    <VideoInput>Disable</VideoInput>
+    <PrinterRedirection>Disable</PrinterRedirection>
+    <LogonCommand>
+   <Command>PowerShell_Ise.exe -file C:\Users\Public\Desktop\mountVHD.ps1</Command>
 </LogonCommand>
+    <ClipboardRedirection>Disable</ClipboardRedirection>
+    <ProtectedClient>Enable</ProtectedClient>
+    <MappedFolders>
+        <MappedFolder>
+            <HostFolder>F:\</HostFolder>
+            <SandboxFolder>C:\Users\Public\Desktop</SandboxFolder>
+            <ReadOnly>true</ReadOnly>
+        </MappedFolder>
+    </MappedFolders>
 </Configuration>
 "@
 $wsbScript | Out-File -FilePath "F:\sandboxConfig.wsb" -Force -Encoding Default
+
+$startScript = @"
+# Run on Sandboxed VM and enter the prompts to copy disk over from Azure
+Connect-AzAccount -devicecode
+"@
+$startScript += "`n`$untrustworthyVMName = Read-Host 'What is the name of the problem VM?'"
+$startScript += "`n`$untrustworthyVMRGName = Read-Host 'What is the Resource Group of the problem VM?'"
+$startScript += "`n`$virtualMachine = Get-AzVM -ResourceGroupName `$untrustworthyVMRGName -Name `$untrustworthyVMName"
+$startScript += "`nWrite-Host 'Stopping VM...'"
+$startScript += "`nStop-AzVM -Name `$untrustworthyVMName -ResourceGroupName `$untrustworthyVMRGName -Force"
+$startScript += "`nWrite-Host 'Granting access to disk...'"
+$startScript += "`n`$sas = Grant-AzDiskAccess -ResourceGroupName `$untrustworthyVMRGName -DiskName `$virtualMachine.StorageProfile.OsDisk.Name -Access 'Read' -DurationInSecond 3600"
+$startScript += "`nWrite-Host 'Downloading disk...'"
+$startScript += "`nStart-BitsTransfer -Source `$sas.AccessSAS -dest F:\disk.vhd"
+$startScript += "`nWrite-Host 'Downloading 7zip to view VHD...'"
+$startScript += "(New-Object System.Net.WebClient).DownloadFile('https://www.7-zip.org/a/7z2200-x64.exe', 'F:\7zip.exe')"
+$startScript += "`nWrite-Host 'Launching sandbox...'"
+$startScript += "`nF:\sandboxConfig.wsb"
+$startScript | Out-File -FilePath F:\downloadVHD.ps1 -Force -Encoding Default
+
+$startBatch = @"
+powershell F:\downloadVHD.ps1
+"@
+$startBatch | Out-File -FilePath "C:\ProgramData\Microsoft\Windows\Start Menu\Programs\StartUp\downloadVHD.bat" -Force -Encoding Default
+
+$mountScript = "# Run these lines one at a time in PowerShell ISE to install 7-Zip and view VHD files from 7-Zip"
+$mountScript += "`nSet-ExecutionPolicy -ExecutionPolicy Bypass -Force -Scope Process"
+$mountScript += "`nC:\Users\Public\Desktop\7zip.exe /S  /D='C:\Program Files\7-Zip'"
+$mountScript += "`n& 'C:\Program Files\7-Zip\7zFM.exe' C:\Users\Public\Desktop\disk.vhd"
+$mountScript | Out-File -FilePath "F:\mountVHD.ps1" -Force -Encoding Default
+
+$startMountScript = @"
+PowerShell.exe -ExecutionPolicy Bypass -file C:\Users\Public\Desktop\mountVHD.ps1
+"@
+$startMountScript | Out-File -FilePath "F:\CLICK-THIS-TO-SHOW-VHD-CONTENT.bat" -Force -Encoding Default
 '@
-# (New-Object System.Net.WebClient).DownloadFile($sas.AccessSAS, 'disk.vhd') # Replacing with Start-BitsTransfer to get a progress bar
 $ScriptContents | Out-File -FilePath $scriptName -Force -Encoding Default
 
 # Push script to Azure VM
